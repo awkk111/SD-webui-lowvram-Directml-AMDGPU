@@ -2,7 +2,7 @@ run the code using lappy, now need to download other stuff.
 
 pip install torch torch-directml diffusers transformers safetensors gradio Pillow numpy realesrgan gfpgan basicsr opencv-python xformers
 
-pip install realesrgan gfpgan basicsr 
+
 
 
 
