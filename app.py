@@ -18,7 +18,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("ImageGen")
 
 # Device configuration
-device = 'privateuseone:0'
+device = None
 default_dtype = torch.float16
 dml_available = False
 
