@@ -9,9 +9,18 @@ from diffusers import (
     StableDiffusionXLPipeline,
     DPMSolverMultistepScheduler,
     EulerDiscreteScheduler,
-    DDIMScheduler
+    DDIMScheduler,
+    PNDMScheduler,
+    LMSDiscreteScheduler
 )
 import numpy as np
+
+# Try to import DirectML for AMD GPU support on Windows
+try:
+    import torch_directml
+    dml_available = True
+except ImportError:
+    dml_available = False
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -19,17 +28,14 @@ logger = logging.getLogger("ImageGen")
 
 # Device configuration
 device = None
-default_dtype = torch.float16
-dml_available = False
-
-try:
-    import torch_directml
-    dml_available = True
+if torch.cuda.is_available():
+    device = "cuda"
+    default_dtype = torch.float16
+elif dml_available:
     device = torch_directml.device()
-    logger.info("Using DirectML (privateuseone) device")
-except ImportError:
-    logger.warning("torch_directml not available, falling back to CPU")
-    device = torch.device("cpu")
+    default_dtype = torch.float32
+else:
+    device = "cpu"
     default_dtype = torch.float32
 
 logger.info(f"Using device: {device}")
@@ -43,7 +49,9 @@ SUPPORTED_RESOLUTIONS = {
 SCHEDULER_MAP = {
     "DPM++ 2M": DPMSolverMultistepScheduler,
     "Euler": EulerDiscreteScheduler,
-    "DDIM": DDIMScheduler
+    "DDIM": DDIMScheduler,
+    "PNDM": PNDMScheduler,
+    "LMS": LMSDiscreteScheduler
 }
 
 class UnifiedPipeline:
@@ -51,20 +59,22 @@ class UnifiedPipeline:
         self.pipe = None
         self.model_type = None
 
-    def load_model(self, model_path: str, model_type: str, low_vram: bool, scheduler_name: str):
+    def load_model(self, model_path: str, model_type: str, low_vram: bool, use_float16: bool, scheduler_name: str):
         model_path_obj = Path(model_path)
         if not model_path_obj.exists():
             raise FileNotFoundError(f"Model file not found: {model_path}")
 
         self.model_type = model_type
-        logger.info(f"Loading {model_type} model on {device}")
+        logger.info(f"Loading {model_type} model from {model_path}")
 
         try:
             model_path_str = str(model_path_obj.resolve())
-            
+            dtype = torch.float16 if use_float16 and device != "cpu" else torch.float32
+
+            # Common pipeline parameters
             pipe_params = {
                 "pretrained_model_link_or_path": model_path_str,
-                "torch_dtype": default_dtype,
+                "torch_dtype": dtype,
                 "safety_checker": None,
                 "use_safetensors": True,
             }
@@ -80,18 +90,18 @@ class UnifiedPipeline:
             scheduler_class = SCHEDULER_MAP[scheduler_name]
             self.pipe.scheduler = scheduler_class.from_config(self.pipe.scheduler.config)
 
-            # DirectML-specific optimizations
-            if dml_available:
-                logger.info("Applying DirectML optimizations")
-                self.pipe = self.pipe.to(device)
-                if low_vram:
-                    self.pipe.enable_attention_slicing()
-                    self.pipe.unet.to(memory_format=torch.channels_last)
-            else:
-                if low_vram:
+            # Apply Low VRAM optimizations
+            if low_vram:
+                logger.info("Applying Low VRAM optimizations")
+                if hasattr(self.pipe, "enable_model_cpu_offload"):
+                    self.pipe.enable_model_cpu_offload()
+                elif hasattr(self.pipe, "enable_sequential_cpu_offload"):
                     self.pipe.enable_sequential_cpu_offload()
-                else:
-                    self.pipe = self.pipe.to(device)
+                
+                if hasattr(torch, "set_float32_matmul_precision"):
+                    torch.set_float32_matmul_precision('medium')
+            else:
+                self.pipe = self.pipe.to(device)
 
             self.pipe.set_progress_bar_config(disable=True)
 
@@ -100,32 +110,24 @@ class UnifiedPipeline:
             raise
 
     def generate(self, prompt, width, height, steps, seed):
-        try:
-            # DirectML generator handling
-            if dml_available:
-                generator = torch.Generator(device=device)
-            else:
-                generator = torch.Generator()
-                
-            generator.manual_seed(seed)
-            
-            return self.pipe(
-                prompt=prompt,
-                width=width,
-                height=height,
-                num_inference_steps=steps,
-                generator=generator,
-                output_type="pil"
-            ).images[0]
-        except RuntimeError as e:
-            logger.error(f"Generation error: {str(e)}")
-            raise
+        # Fixed generator handling
+        if device == "cpu":
+            generator = torch.Generator().manual_seed(seed)
+        else:
+            generator = torch.Generator(device=device).manual_seed(seed)
+
+        return self.pipe(
+            prompt=prompt,
+            width=width,
+            height=height,
+            num_inference_steps=steps,
+            generator=generator,
+            output_type="pil"
+        ).images[0]
 
 def generate_image(model_type, prompt, resolution, model_path, seed, randomize_seed, 
-                  steps, save_path, low_vram, scheduler):
+                  steps, save_path, low_vram, use_float16, scheduler):
     try:
-        start_time = time.time()
-        
         if model_type not in SUPPORTED_RESOLUTIONS:
             return None, seed, "Invalid model type"
         
@@ -139,8 +141,9 @@ def generate_image(model_type, prompt, resolution, model_path, seed, randomize_s
         width, height = map(int, resolution.split('x'))
 
         pipeline = UnifiedPipeline()
-        pipeline.load_model(model_path, model_type, low_vram, scheduler)
+        pipeline.load_model(model_path, model_type, low_vram, use_float16, scheduler)
 
+        start_time = time.time()
         image = pipeline.generate(prompt, width, height, steps, seed)
 
         save_path = Path(save_path)
@@ -164,8 +167,8 @@ def scan_model_files(model_dir):
         if f.is_file() and f.suffix.lower() in [".safetensors", ".ckpt"]
     ]
 
-with gr.Blocks(title="DirectML Optimized Generator") as demo:
-    gr.Markdown(f"## 🚀 Device: {device} | Precision: {default_dtype}")
+with gr.Blocks(title="Enhanced Image Generator") as demo:
+    gr.Markdown("# 🖼️ Enhanced Image Generator")
     
     with gr.Row():
         with gr.Column():
@@ -199,16 +202,21 @@ with gr.Blocks(title="DirectML Optimized Generator") as demo:
                 choices=list(SCHEDULER_MAP.keys()),
                 value="DPM++ 2M"
             )
-            steps = gr.Slider(10, 40, value=20, step=1, label="Inference Steps")
+            steps = gr.Slider(1, 50, value=20, label="Inference Steps")
             seed = gr.Number(42, label="Seed")
             randomize_seed = gr.Checkbox(True, label="Randomize Seed")
-            low_vram = gr.Checkbox(True, label="Low VRAM Mode (Recommended)")
+            low_vram = gr.Checkbox(False, label="Low VRAM Mode")
+            use_float16 = gr.Checkbox(
+                value=default_dtype == torch.float16,
+                label="Use Float16 (faster, less memory)",
+                interactive=device != "cpu"
+            )
             save_path = gr.Textbox(
                 label="Save Path",
                 value="./outputs",
                 placeholder="Path to save generated images"
             )
-            generate_btn = gr.Button("Generate & Benchmark", variant="primary")
+            generate_btn = gr.Button("Generate", variant="primary")
             
         with gr.Column():
             output_image = gr.Image(label="Generated Image", height=512)
@@ -233,6 +241,7 @@ with gr.Blocks(title="DirectML Optimized Generator") as demo:
             steps,
             save_path,
             low_vram,
+            use_float16,
             scheduler
         ],
         outputs=[output_image, info_seed, info_latency]
