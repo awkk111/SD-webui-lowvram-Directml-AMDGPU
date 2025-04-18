@@ -20,11 +20,11 @@ import torch_directml  # This line ensures you're using DirectML
 
 # ✅ Ensure DirectML is the only device being used
 try:
-    device = torch_directml.device()  # Initialize DirectML device
+    device = torch_directml.device()
     print(f"✅ Using DirectML: {device}")
 except Exception as e:
     print(f"❌ Failed to detect DirectML: {str(e)}")
-    exit(1)  # Exit if DirectML is not available
+    exit(1)
 
 DEFAULT_MODEL_FOLDER = "D:/py/SD-WEBUI-Image/models/Stable-diffusion"
 
@@ -72,7 +72,6 @@ class CustomPipeline:
             return f"❌ Model file not found: {model_path}"
 
         try:
-            # 🧹 Clear previous pipeline
             if self.pipe:
                 del self.pipe
                 gc.collect()
@@ -81,7 +80,6 @@ class CustomPipeline:
 
             dtype = torch.float16 if use_fp16 else torch.float32
 
-            # ✅ Load model
             self.pipe = StableDiffusionPipeline.from_single_file(
                 pretrained_model_link_or_path=str(model_path),
                 torch_dtype=dtype,
@@ -90,13 +88,10 @@ class CustomPipeline:
                 local_files_only=True
             )
 
-            # ✅ Scheduler
             scheduler_class = SCHEDULER_MAP.get(scheduler_name, DPMSolverMultistepScheduler)
             self.pipe.scheduler = scheduler_class.from_config(self.pipe.scheduler.config)
 
-            # ✅ Move to DirectML device
-            self.pipe.to(device)  # Ensure that we only use DirectML device
-
+            self.pipe.to(device)
             print(f"🧠 Pipeline UNet device: {next(self.pipe.unet.parameters()).device}")
             return f"✅ Loaded: {selected_filename} | Device: {device} | Precision: {'FP16' if use_fp16 else 'FP32'}"
 
@@ -114,6 +109,10 @@ class CustomPipeline:
 
         return image
 
+    def restore_faces(self, image):
+        # Placeholder face restoration using extra sharpening
+        return ImageEnhance.Sharpness(image).enhance(2.0)
+
     def detect_faces(self, image):
         cv_image = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
         gray = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
@@ -123,7 +122,7 @@ class CustomPipeline:
 
     def generate(self, prompt, negative_prompt, steps, guidance, seed, size_label, enhance, upscale):
         if not self.pipe:
-            return None, "❌ No model loaded."
+            return None, None, "❌ No model loaded."
 
         try:
             width, height = image_sizes.get(size_label, (512, 512))
@@ -131,11 +130,10 @@ class CustomPipeline:
 
             print("🧠 Generating image...")
             with tqdm(total=100, desc="Generating", ncols=70) as pbar:
-                for i in range(90):  # Simulate 90% progress
+                for i in range(90):
                     time.sleep(0.01)
                     pbar.update(1)
 
-                # Inference
                 result = self.pipe(
                     prompt=prompt,
                     negative_prompt=negative_prompt,
@@ -149,35 +147,32 @@ class CustomPipeline:
 
             image = result.images[0]
 
-            # Save preview
             os.makedirs("outputs", exist_ok=True)
             preview_path = f"outputs/{int(time.time())}_preview.png"
             image.save(preview_path)
-            print(f"💾 Preview saved at 90%: {preview_path}")
+            print(f"💾 Preview saved: {preview_path}")
 
-            # Enhance & upscale
             image = self.enhance_image(image, enhance, upscale)
-
-            # Face detection
             faces = self.detect_faces(image)
             face_status = f"👤 Detected {len(faces)} face(s)" if len(faces) else "😶 No face detected"
 
-            # Final save
             final_path = f"outputs/{int(time.time())}_final.png"
             image.save(final_path)
 
-            return image, f"✅ Final saved: {final_path}\n📂 Preview: {preview_path}\n{face_status}"
+            restored_image = self.restore_faces(image.copy())
+
+            return image, restored_image, f"✅ Final saved: {final_path}\n📂 Preview: {preview_path}\n{face_status}"
 
         except Exception as e:
             print(f"Generation error: {str(e)}")
-            return None, f"❌ Generation failed: {str(e)}"
+            return None, None, f"❌ Generation failed: {str(e)}"
 
 
 # 🚀 Gradio UI
 pipeline = CustomPipeline()
 
 with gr.Blocks(title="Enhanced Stable Diffusion DirectML") as demo:
-    gr.Markdown("## 🖼️ Stable Diffusion DirectML (with Enhancement & Face Detection)")
+    gr.Markdown("## 🖼️ Stable Diffusion DirectML (with Enhancement & Face Restoration)")
 
     with gr.Row():
         with gr.Column(scale=2):
@@ -206,7 +201,13 @@ with gr.Blocks(title="Enhanced Stable Diffusion DirectML") as demo:
         upscale = gr.Checkbox(value=True, label="📈 Upscale Image 2x")
 
     generate_btn = gr.Button("✨ Generate", variant="primary")
-    output_image = gr.Image(label="Generated Output", type="pil")
+
+    with gr.Row():
+        with gr.Column(scale=1):
+            original_image = gr.Image(label="🖼️ Enhanced Image", type="pil", height=360)
+        with gr.Column(scale=1):
+            restored_image = gr.Image(label="👨‍🔧 Face Restored", type="pil", height=360)
+
     save_status = gr.Markdown()
 
     refresh_btn.click(
@@ -222,6 +223,10 @@ with gr.Blocks(title="Enhanced Stable Diffusion DirectML") as demo:
     )
 
     generate_btn.click(
-        fn=pipeline.generate, inputs=[prompt, negative_prompt, steps, guidance, seed, size_dropdown, enhance, upscale], outputs=[output_image, save_status] )
+        fn=pipeline.generate,
+        inputs=[prompt, negative_prompt, steps, guidance, seed, size_dropdown, enhance, upscale],
+        outputs=[original_image, restored_image, save_status]
+    )
 
-if __name__ == "__main__": demo.launch(server_port=7860, show_error=True)
+if __name__ == "__main__":
+    demo.launch(server_port=9393, show_error=True)
