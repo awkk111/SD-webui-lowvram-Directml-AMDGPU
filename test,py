@@ -1,0 +1,227 @@
+import os
+import gc
+import time
+import torch
+import cv2
+import numpy as np
+from tqdm import tqdm
+from pathlib import Path
+from PIL import Image, ImageEnhance
+import gradio as gr
+from diffusers import (
+    StableDiffusionPipeline,
+    DPMSolverMultistepScheduler,
+    EulerDiscreteScheduler,
+    DDIMScheduler,
+    PNDMScheduler,
+    LMSDiscreteScheduler
+)
+import torch_directml  # This line ensures you're using DirectML
+
+# ✅ Ensure DirectML is the only device being used
+try:
+    device = torch_directml.device()  # Initialize DirectML device
+    print(f"✅ Using DirectML: {device}")
+except Exception as e:
+    print(f"❌ Failed to detect DirectML: {str(e)}")
+    exit(1)  # Exit if DirectML is not available
+
+DEFAULT_MODEL_FOLDER = "D:/py/SD-WEBUI-Image/models/Stable-diffusion"
+
+SCHEDULER_MAP = {
+    "DPM++ 2M": DPMSolverMultistepScheduler,
+    "Euler": EulerDiscreteScheduler,
+    "DDIM": DDIMScheduler,
+    "PNDM": PNDMScheduler,
+    "LMS": LMSDiscreteScheduler
+}
+
+image_sizes = {
+    "192x256": (192, 256),
+    "360x480": (360, 480),
+    "256x256": (256, 256),
+    "256x512": (256, 512),
+    "512x512": (512, 512),
+    "512x768": (512, 768),
+    "1024x768": (1024, 768)
+}
+
+
+class CustomPipeline:
+    def __init__(self):
+        self.pipe = None
+        self.model_folder = Path(DEFAULT_MODEL_FOLDER)
+
+    def list_models(self, folder):
+        self.model_folder = Path(folder)
+        if not self.model_folder.exists():
+            return gr.update(choices=[], value=None), "❌ Folder not found."
+
+        models = list(self.model_folder.glob("*.safetensors"))
+        if not models:
+            return gr.update(choices=[], value=None), "⚠️ No .safetensors models found."
+
+        return gr.update(choices=[m.name for m in models], value=models[0].name), f"✅ Found {len(models)} model(s)."
+
+    def load_model(self, selected_filename, use_fp16, low_vram, scheduler_name):
+        if not selected_filename:
+            return "❌ No model selected."
+
+        model_path = self.model_folder / selected_filename
+        if not model_path.exists():
+            return f"❌ Model file not found: {model_path}"
+
+        try:
+            # 🧹 Clear previous pipeline
+            if self.pipe:
+                del self.pipe
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+            dtype = torch.float16 if use_fp16 else torch.float32
+
+            # ✅ Load model
+            self.pipe = StableDiffusionPipeline.from_single_file(
+                pretrained_model_link_or_path=str(model_path),
+                torch_dtype=dtype,
+                safety_checker=None,
+                use_safetensors=True,
+                local_files_only=True
+            )
+
+            # ✅ Scheduler
+            scheduler_class = SCHEDULER_MAP.get(scheduler_name, DPMSolverMultistepScheduler)
+            self.pipe.scheduler = scheduler_class.from_config(self.pipe.scheduler.config)
+
+            # ✅ Move to DirectML device
+            self.pipe.to(device)  # Ensure that we only use DirectML device
+
+            print(f"🧠 Pipeline UNet device: {next(self.pipe.unet.parameters()).device}")
+            return f"✅ Loaded: {selected_filename} | Device: {device} | Precision: {'FP16' if use_fp16 else 'FP32'}"
+
+        except Exception as e:
+            return f"❌ Loading failed: {str(e)}"
+
+    def enhance_image(self, image, enhance=True, upscale=True):
+        if enhance:
+            image = ImageEnhance.Contrast(image).enhance(1.15)
+            image = ImageEnhance.Sharpness(image).enhance(1.3)
+
+        if upscale:
+            w, h = image.size
+            image = image.resize((w * 2, h * 2), Image.LANCZOS)
+
+        return image
+
+    def detect_faces(self, image):
+        cv_image = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+        gray = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
+        face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+        faces = face_cascade.detectMultiScale(gray, 1.1, 4)
+        return faces
+
+    def generate(self, prompt, negative_prompt, steps, guidance, seed, size_label, enhance, upscale):
+        if not self.pipe:
+            return None, "❌ No model loaded."
+
+        try:
+            width, height = image_sizes.get(size_label, (512, 512))
+            generator = torch.Generator(device).manual_seed(int(seed)) if seed != -1 else None
+
+            print("🧠 Generating image...")
+            with tqdm(total=100, desc="Generating", ncols=70) as pbar:
+                for i in range(90):  # Simulate 90% progress
+                    time.sleep(0.01)
+                    pbar.update(1)
+
+                # Inference
+                result = self.pipe(
+                    prompt=prompt,
+                    negative_prompt=negative_prompt,
+                    num_inference_steps=int(steps),
+                    guidance_scale=guidance,
+                    generator=generator,
+                    width=width,
+                    height=height
+                )
+                pbar.update(10)
+
+            image = result.images[0]
+
+            # Save preview
+            os.makedirs("outputs", exist_ok=True)
+            preview_path = f"outputs/{int(time.time())}_preview.png"
+            image.save(preview_path)
+            print(f"💾 Preview saved at 90%: {preview_path}")
+
+            # Enhance & upscale
+            image = self.enhance_image(image, enhance, upscale)
+
+            # Face detection
+            faces = self.detect_faces(image)
+            face_status = f"👤 Detected {len(faces)} face(s)" if len(faces) else "😶 No face detected"
+
+            # Final save
+            final_path = f"outputs/{int(time.time())}_final.png"
+            image.save(final_path)
+
+            return image, f"✅ Final saved: {final_path}\n📂 Preview: {preview_path}\n{face_status}"
+
+        except Exception as e:
+            print(f"Generation error: {str(e)}")
+            return None, f"❌ Generation failed: {str(e)}"
+
+
+# 🚀 Gradio UI
+pipeline = CustomPipeline()
+
+with gr.Blocks(title="Enhanced Stable Diffusion DirectML") as demo:
+    gr.Markdown("## 🖼️ Stable Diffusion DirectML (with Enhancement & Face Detection)")
+
+    with gr.Row():
+        with gr.Column(scale=2):
+            folder_input = gr.Textbox(label="Model Folder", value=DEFAULT_MODEL_FOLDER)
+            model_dropdown = gr.Dropdown(label="Available Models", interactive=True)
+            refresh_btn = gr.Button("🔄 Refresh Models")
+            status = gr.Markdown()
+
+        with gr.Column(scale=1):
+            fp16 = gr.Checkbox(value=True, label="FP16 Precision")
+            low_vram = gr.Checkbox(value=True, label="Low VRAM Mode")
+            scheduler = gr.Dropdown(label="Sampling Method", choices=list(SCHEDULER_MAP.keys()), value="DPM++ 2M")
+
+    with gr.Row():
+        prompt = gr.Textbox(label="Prompt", placeholder="Enter positive prompt...", lines=3)
+        negative_prompt = gr.Textbox(label="Negative Prompt", placeholder="Enter negative prompt...", lines=3)
+
+    with gr.Row():
+        steps = gr.Slider(1, 100, value=25, label="Sampling Steps")
+        guidance = gr.Slider(1.0, 20.0, value=7.5, label="CFG Scale")
+        seed = gr.Number(value=-1, label="Seed (-1 = random)")
+        size_dropdown = gr.Dropdown(label="Image Size", choices=list(image_sizes.keys()), value="512x512")
+
+    with gr.Row():
+        enhance = gr.Checkbox(value=True, label="🪄 Enhance Image")
+        upscale = gr.Checkbox(value=True, label="📈 Upscale Image 2x")
+
+    generate_btn = gr.Button("✨ Generate", variant="primary")
+    output_image = gr.Image(label="Generated Output", type="pil")
+    save_status = gr.Markdown()
+
+    refresh_btn.click(
+        fn=pipeline.list_models,
+        inputs=[folder_input],
+        outputs=[model_dropdown, status]
+    )
+
+    model_dropdown.select(
+        fn=pipeline.load_model,
+        inputs=[model_dropdown, fp16, low_vram, scheduler],
+        outputs=[status]
+    )
+
+    generate_btn.click(
+        fn=pipeline.generate, inputs=[prompt, negative_prompt, steps, guidance, seed, size_dropdown, enhance, upscale], outputs=[output_image, save_status] )
+
+if __name__ == "__main__": demo.launch(server_port=7860, show_error=True)
