@@ -1,13 +1,13 @@
-run the code using lappy, need to download other stuff.
+Run the code using lappy, need to download other stuff.
 
 
 
 
-download lcm models from net, 
+**Download lcm models from net, 
 
 
-rename to model.safetensors copy it to models directory.create directory from where you will run app.py.
-
+<b>**Rename to model.safetensors copy it to models directory.create directory from where you will run app.py.
+</b>
 
 
 
