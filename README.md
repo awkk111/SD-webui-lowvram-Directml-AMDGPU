@@ -20,7 +20,7 @@ install python and below pkgs.
 
 
 
-pip install torch torch-directml diffusers transformers safetensors gradio Pillow numpy realesrgan gfpgan basicsr opencv-python xformers
+pip install torch torch-directml diffusers transformers safetensors gradio Pillow numpy realesrgan gfpgan basicsr opencv-python 
 
 
 
