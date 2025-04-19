@@ -36,3 +36,8 @@ I  have multple app files as testing purpose ,,, all are working,,,, testing is 
 
 
 All Codes are tested on AMD Lappy: 2GB VRAM. only SD model. I Have tested 4GB full Fp32 model also.
+
+
+https://civitai.com/models/1033675/goddess-project-lite-15gb======================================================Light Model To Test....
+
+
