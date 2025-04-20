@@ -9,11 +9,6 @@ Run the code using lappy, need to download other stuff.
 <b>**Rename to model.safetensors copy it to models directory.create directory from where you will run app.py.
 </b>
 
-
-
-
-
-
 install python and below pkgs.
 
 
@@ -21,6 +16,12 @@ install python and below pkgs.
 
 
 pip install torch torch-directml diffusers transformers safetensors gradio Pillow numpy realesrgan gfpgan basicsr opencv-python 
+
+
+![Screenshot 095854](https://github.com/user-attachments/assets/04a6fc86-5ac3-4595-bb51-ab5960729007)
+
+
+
 
 
 
